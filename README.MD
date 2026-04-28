@@ -120,7 +120,7 @@ The pipeline follows industry best practices including time-series cross-validat
 
 ### 1. Clone the Repository
 ### 2. Run this Command in your terminal
--pip install -r requirements.txt
--jupyter notebook
+- pip install -r requirements.txt
+- jupyter notebook
 
 ---
