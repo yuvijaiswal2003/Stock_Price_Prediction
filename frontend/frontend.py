@@ -47,7 +47,8 @@ if st.button("Predict"):
                 json={
                     "ticker": ticker,
                     "end_date": str(end_date)
-                }
+                },
+                timeout=120
             )
 
             result = response.json()
