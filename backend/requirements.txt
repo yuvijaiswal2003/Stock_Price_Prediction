@@ -9,3 +9,4 @@ streamlit==1.35.0
 requests==2.31.0
 matplotlib==3.8.4
 python-multipart==0.0.9
+requests-cache==0.9.8

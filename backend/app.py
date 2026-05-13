@@ -8,7 +8,7 @@ import yfinance as yf
 import pandas as pd
 import numpy as np
 from datetime import datetime, timedelta
-
+from requests import Session
 from model import RNNModel
 
 # -----------------------------
@@ -82,6 +82,18 @@ def predict(data: StockInput):
     # Fetch enough history before end_date (single call)
     start_dt = end_dt - timedelta(days=200)
     future_end_dt = end_dt + timedelta(days=10)
+    session = Session()
+    session.headers.update({
+        'User-Agent': (
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
+            'AppleWebKit/537.36 (KHTML, like Gecko) '
+            'Chrome/120.0.0.0 Safari/537.36'
+        ),
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+        'Accept-Language': 'en-US,en;q=0.5',
+        'Accept-Encoding': 'gzip, deflate, br',
+        'Connection': 'keep-alive',
+    })
 
     try:
         # -----------------------------
@@ -93,6 +105,7 @@ def predict(data: StockInput):
             end=future_end_dt.strftime("%Y-%m-%d"),
             progress=False,
             auto_adjust=True
+            session=session
         )
     except Exception as e:
         return {"error": f"Failed to fetch stock data: {str(e)}"}
