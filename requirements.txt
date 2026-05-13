@@ -1,5 +1,6 @@
 numpy
 yfinance
+seaborn
 pandas
 matplotlib
 scikit-learn
