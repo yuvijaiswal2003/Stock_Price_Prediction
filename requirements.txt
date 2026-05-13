@@ -1,8 +1,0 @@
-numpy
-yfinance
-seaborn
-pandas
-matplotlib
-scikit-learn
-torch
-optuna
