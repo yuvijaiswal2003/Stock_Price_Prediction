@@ -1,15 +1,22 @@
 from fastapi import FastAPI
 from pydantic import BaseModel
-from contextlib import asynccontextmanager
 
 import torch
 import pickle
-import yfinance as yf
 import pandas as pd
 import numpy as np
+import requests
+import os
 from datetime import datetime, timedelta
-from requests import Session
+import logging
+
 from model import RNNModel
+
+# -----------------------------
+# Logging
+# -----------------------------
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
 
 # -----------------------------
 # FastAPI App
@@ -33,6 +40,11 @@ close_scaler = pickle.load(open("close_scaler.pkl", "rb"))
 SEQ_LEN = 60
 
 # -----------------------------
+# Alpha Vantage API Key
+# -----------------------------
+ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
+
+# -----------------------------
 # Load Model
 # -----------------------------
 model = RNNModel(
@@ -43,9 +55,7 @@ model = RNNModel(
     rnn_type="GRU"
 ).to(device)
 
-model.load_state_dict(
-    torch.load("stock_model.pth", map_location=device)
-)
+model.load_state_dict(torch.load("stock_model.pth", map_location=device))
 model.eval()
 
 # -----------------------------
@@ -54,6 +64,61 @@ model.eval()
 class StockInput(BaseModel):
     ticker: str
     end_date: str
+
+# -----------------------------
+# Fetch stock data from Alpha Vantage
+# -----------------------------
+def fetch_stock_data(ticker: str) -> pd.DataFrame:
+
+    url = "https://www.alphavantage.co/query"
+
+    params = {
+        "function": "TIME_SERIES_DAILY",
+        "symbol": ticker,
+        "outputsize": "full",       # get full history
+        "datatype": "json",
+        "apikey": ALPHA_VANTAGE_KEY
+    }
+
+    logger.info(f"Fetching data for {ticker} from Alpha Vantage")
+
+    response = requests.get(url, params=params, timeout=30)
+    data = response.json()
+
+    # Check for errors
+    if "Error Message" in data:
+        raise ValueError(f"Invalid ticker: {ticker}")
+
+    if "Note" in data:
+        raise ValueError("Alpha Vantage API rate limit reached. Try again in a minute.")
+
+    if "Information" in data:
+        raise ValueError("Alpha Vantage API limit reached. Please check your API key.")
+
+    if "Time Series (Daily)" not in data:
+        logger.error(f"Unexpected response: {data}")
+        raise ValueError(f"No data returned for ticker '{ticker}'")
+
+    # Parse into DataFrame
+    ts = data["Time Series (Daily)"]
+
+    df = pd.DataFrame.from_dict(ts, orient="index")
+    df.index = pd.to_datetime(df.index)
+    df = df.sort_index(ascending=True)
+
+    df.rename(columns={
+        "1. open":   "Open",
+        "2. high":   "High",
+        "3. low":    "Low",
+        "4. close":  "Close",
+        "5. volume": "Volume"
+    }, inplace=True)
+
+    df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+
+    logger.info(f"Fetched {len(df)} rows for {ticker}")
+
+    return df
 
 # -----------------------------
 # Home / Health Check Route
@@ -73,55 +138,34 @@ def health():
 def predict(data: StockInput):
 
     ticker = data.ticker
+    logger.info(f"Predicting for ticker: {ticker}, date: {data.end_date}")
 
     try:
         end_dt = datetime.strptime(data.end_date, "%Y-%m-%d")
     except ValueError:
         return {"error": "Invalid date format. Use YYYY-MM-DD"}
 
-    # Fetch enough history before end_date (single call)
-    start_dt = end_dt - timedelta(days=200)
-    future_end_dt = end_dt + timedelta(days=10)
-    session = Session()
-    session.headers.update({
-        'User-Agent': (
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) '
-            'AppleWebKit/537.36 (KHTML, like Gecko) '
-            'Chrome/120.0.0.0 Safari/537.36'
-        ),
-        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-        'Accept-Language': 'en-US,en;q=0.5',
-        'Accept-Encoding': 'gzip, deflate, br',
-        'Connection': 'keep-alive',
-    })
-
+    # -----------------------------
+    # Fetch stock data
+    # -----------------------------
     try:
-        # -----------------------------
-        # Single yfinance call for all data
-        # -----------------------------
-        full_df = yf.download(
-            ticker,
-            start=start_dt.strftime("%Y-%m-%d"),
-            end=future_end_dt.strftime("%Y-%m-%d"),
-            progress=False,
-            auto_adjust=True,
-            session=session
-        )
+        full_df = fetch_stock_data(ticker)
+    except ValueError as e:
+        return {"error": str(e)}
     except Exception as e:
+        logger.error(f"Fetch error: {str(e)}")
         return {"error": f"Failed to fetch stock data: {str(e)}"}
 
     if full_df.empty:
         return {"error": f"No data found for ticker '{ticker}'"}
-
-    # Flatten MultiIndex columns if present
-    if isinstance(full_df.columns, pd.MultiIndex):
-        full_df.columns = full_df.columns.get_level_values(0)
 
     # -----------------------------
     # Split into historical and future
     # -----------------------------
     hist_df = full_df[full_df.index < pd.Timestamp(end_dt)]
     future_df = full_df[full_df.index >= pd.Timestamp(end_dt)]
+
+    logger.info(f"hist_df: {len(hist_df)} rows, future_df: {len(future_df)} rows")
 
     if len(hist_df) < SEQ_LEN:
         return {"error": f"Not enough historical data. Got {len(hist_df)}, need {SEQ_LEN}"}
