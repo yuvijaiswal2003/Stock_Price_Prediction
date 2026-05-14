@@ -40,9 +40,9 @@ close_scaler = pickle.load(open("close_scaler.pkl", "rb"))
 SEQ_LEN = 60
 
 # -----------------------------
-# Alpha Vantage API Key
+# Twelve Data API Key
 # -----------------------------
-ALPHA_VANTAGE_KEY = os.environ.get("ALPHA_VANTAGE_KEY", "demo")
+TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "")
 
 # -----------------------------
 # Load Model
@@ -66,51 +66,63 @@ class StockInput(BaseModel):
     end_date: str
 
 # -----------------------------
-# Fetch stock data from Alpha Vantage
+# Fetch stock data from Twelve Data
 # -----------------------------
-def fetch_stock_data(ticker: str) -> pd.DataFrame:
+def fetch_stock_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
 
-    url = "https://www.alphavantage.co/query"
+    url = "https://api.twelvedata.com/time_series"
 
     params = {
-        "function": "TIME_SERIES_DAILY",
-        "symbol": ticker,
-        "outputsize": "full",        # ← full history, not compact
-        "datatype": "json",
-        "apikey": ALPHA_VANTAGE_KEY
+        "symbol":     ticker,
+        "interval":   "1day",
+        "start_date": start_date,
+        "end_date":   end_date,
+        "outputsize": 5000,          # max rows
+        "order":      "ASC",         # oldest first
+        "apikey":     TWELVE_DATA_KEY
     }
+
+    logger.info(f"Fetching {ticker} from {start_date} to {end_date}")
 
     response = requests.get(url, params=params, timeout=30)
     data = response.json()
 
-    if "Error Message" in data:
-        raise ValueError(f"Invalid ticker: {ticker}")
+    # -----------------------------
+    # Error handling
+    # -----------------------------
+    if data.get("status") == "error":
+        msg = data.get("message", "Unknown error")
+        raise ValueError(f"Twelve Data error: {msg}")
 
-    if "Note" in data:
-        raise ValueError("API rate limit: 5 requests/min. Wait 1 minute.")
+    if "values" not in data:
+        logger.error(f"Unexpected response: {data}")
+        raise ValueError(f"No data returned for ticker '{ticker}'")
 
-    # Only raise if Information mentions rate limit
-    if "Information" in data:
-        info = data["Information"]
-        if "25 requests" in info or "rate limit" in info.lower():
-            raise ValueError("Daily limit reached (25/day). Try tomorrow.")
-        raise ValueError(f"API error: {info}")
+    values = data["values"]
 
-    if "Time Series (Daily)" not in data:
-        raise ValueError(f"No data returned for '{ticker}'")
+    if len(values) == 0:
+        raise ValueError(f"Empty data for ticker '{ticker}'")
 
-    ts = data["Time Series (Daily)"]
-    df = pd.DataFrame.from_dict(ts, orient="index")
-    df.index = pd.to_datetime(df.index)
+    # -----------------------------
+    # Parse into DataFrame
+    # -----------------------------
+    df = pd.DataFrame(values)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df.set_index("datetime", inplace=True)
     df = df.sort_index(ascending=True)
 
     df.rename(columns={
-        "1. open": "Open", "2. high": "High",
-        "3. low": "Low", "4. close": "Close",
-        "5. volume": "Volume"
+        "open":   "Open",
+        "high":   "High",
+        "low":    "Low",
+        "close":  "Close",
+        "volume": "Volume"
     }, inplace=True)
 
     df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+
+    logger.info(f"Fetched {len(df)} rows for {ticker}")
+
     return df
 
 # -----------------------------
@@ -133,16 +145,26 @@ def predict(data: StockInput):
     ticker = data.ticker
     logger.info(f"Predicting for ticker: {ticker}, date: {data.end_date}")
 
+    # -----------------------------
+    # Validate date
+    # -----------------------------
     try:
         end_dt = datetime.strptime(data.end_date, "%Y-%m-%d")
     except ValueError:
         return {"error": "Invalid date format. Use YYYY-MM-DD"}
 
+    start_dt     = end_dt - timedelta(days=200)
+    future_end_dt = end_dt + timedelta(days=10)
+
     # -----------------------------
     # Fetch stock data
     # -----------------------------
     try:
-        full_df = fetch_stock_data(ticker)
+        full_df = fetch_stock_data(
+            ticker,
+            start_date=start_dt.strftime("%Y-%m-%d"),
+            end_date=future_end_dt.strftime("%Y-%m-%d")
+        )
     except ValueError as e:
         return {"error": str(e)}
     except Exception as e:
@@ -155,7 +177,7 @@ def predict(data: StockInput):
     # -----------------------------
     # Split into historical and future
     # -----------------------------
-    hist_df = full_df[full_df.index < pd.Timestamp(end_dt)]
+    hist_df   = full_df[full_df.index < pd.Timestamp(end_dt)]
     future_df = full_df[full_df.index >= pd.Timestamp(end_dt)]
 
     logger.info(f"hist_df: {len(hist_df)} rows, future_df: {len(future_df)} rows")
@@ -201,7 +223,7 @@ def predict(data: StockInput):
     # -----------------------------
     # Error Calculation
     # -----------------------------
-    absolute_error = abs(actual_price - predicted_price)
+    absolute_error   = abs(actual_price - predicted_price)
     percentage_error = (absolute_error / actual_price) * 100
 
     # -----------------------------
@@ -210,8 +232,8 @@ def predict(data: StockInput):
     return {
         "ticker": ticker,
         "prediction_based_on_date": data.end_date,
-        "predicted_next_close": round(float(predicted_price), 2),
-        "actual_next_close": round(float(actual_price), 2),
-        "absolute_error": round(float(absolute_error), 2),
-        "percentage_error": round(float(percentage_error), 2)
+        "predicted_next_close":     round(float(predicted_price), 2),
+        "actual_next_close":        round(float(actual_price), 2),
+        "absolute_error":           round(float(absolute_error), 2),
+        "percentage_error":         round(float(percentage_error), 2)
     }
