@@ -104,7 +104,7 @@ def predict(data: StockInput):
             start=start_dt.strftime("%Y-%m-%d"),
             end=future_end_dt.strftime("%Y-%m-%d"),
             progress=False,
-            auto_adjust=True
+            auto_adjust=True,
             session=session
         )
     except Exception as e:
