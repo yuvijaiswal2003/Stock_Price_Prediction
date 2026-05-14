@@ -75,49 +75,42 @@ def fetch_stock_data(ticker: str) -> pd.DataFrame:
     params = {
         "function": "TIME_SERIES_DAILY",
         "symbol": ticker,
-        "outputsize": "full",       # get full history
+        "outputsize": "full",        # ← full history, not compact
         "datatype": "json",
         "apikey": ALPHA_VANTAGE_KEY
     }
 
-    logger.info(f"Fetching data for {ticker} from Alpha Vantage")
-
     response = requests.get(url, params=params, timeout=30)
     data = response.json()
 
-    # Check for errors
     if "Error Message" in data:
         raise ValueError(f"Invalid ticker: {ticker}")
 
     if "Note" in data:
-        raise ValueError("Alpha Vantage API rate limit reached. Try again in a minute.")
+        raise ValueError("API rate limit: 5 requests/min. Wait 1 minute.")
 
+    # Only raise if Information mentions rate limit
     if "Information" in data:
-        raise ValueError("Alpha Vantage API limit reached. Please check your API key.")
+        info = data["Information"]
+        if "25 requests" in info or "rate limit" in info.lower():
+            raise ValueError("Daily limit reached (25/day). Try tomorrow.")
+        raise ValueError(f"API error: {info}")
 
     if "Time Series (Daily)" not in data:
-        logger.error(f"Unexpected response: {data}")
-        raise ValueError(f"No data returned for ticker '{ticker}'")
+        raise ValueError(f"No data returned for '{ticker}'")
 
-    # Parse into DataFrame
     ts = data["Time Series (Daily)"]
-
     df = pd.DataFrame.from_dict(ts, orient="index")
     df.index = pd.to_datetime(df.index)
     df = df.sort_index(ascending=True)
 
     df.rename(columns={
-        "1. open":   "Open",
-        "2. high":   "High",
-        "3. low":    "Low",
-        "4. close":  "Close",
+        "1. open": "Open", "2. high": "High",
+        "3. low": "Low", "4. close": "Close",
         "5. volume": "Volume"
     }, inplace=True)
 
     df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
-
-    logger.info(f"Fetched {len(df)} rows for {ticker}")
-
     return df
 
 # -----------------------------
