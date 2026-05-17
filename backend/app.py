@@ -5,15 +5,10 @@ import torch
 import pickle
 import pandas as pd
 import numpy as np
+import requests
 import os
-import time
-import logging
 from datetime import datetime, timedelta
-
-import yfinance as yf
-from requests import Session
-from requests.adapters import HTTPAdapter
-from urllib3.util.retry import Retry
+import logging
 
 from model import RNNModel
 
@@ -45,6 +40,11 @@ close_scaler = pickle.load(open("close_scaler.pkl", "rb"))
 SEQ_LEN = 60
 
 # -----------------------------
+# Twelve Data API Key
+# -----------------------------
+TWELVE_DATA_KEY = os.environ.get("TWELVE_DATA_KEY", "")
+
+# -----------------------------
 # Load Model
 # -----------------------------
 model = RNNModel(
@@ -66,71 +66,64 @@ class StockInput(BaseModel):
     end_date: str
 
 # -----------------------------
-# Build robust session for yfinance
+# Fetch stock data from Twelve Data
 # -----------------------------
-def get_session():
-    session = Session()
+def fetch_stock_data(ticker: str, start_date: str, end_date: str) -> pd.DataFrame:
 
-    # Retry on failure
-    retry = Retry(
-        total=3,
-        backoff_factor=2,
-        status_forcelist=[429, 500, 502, 503, 504]
-    )
-    adapter = HTTPAdapter(max_retries=retry)
-    session.mount("https://", adapter)
-    session.mount("http://", adapter)
+    url = "https://api.twelvedata.com/time_series"
 
-    # Browser-like headers
-    session.headers.update({
-        "User-Agent": (
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-            "AppleWebKit/537.36 (KHTML, like Gecko) "
-            "Chrome/120.0.0.0 Safari/537.36"
-        ),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-        "Accept-Language": "en-US,en;q=0.5",
-        "Accept-Encoding": "gzip, deflate, br",
-        "Connection": "keep-alive",
-        "Upgrade-Insecure-Requests": "1",
-        "Cache-Control": "max-age=0",
-    })
+    params = {
+        "symbol":     ticker,
+        "interval":   "1day",
+        "start_date": start_date,
+        "end_date":   end_date,
+        "outputsize": 5000,          # max rows
+        "order":      "ASC",         # oldest first
+        "apikey":     TWELVE_DATA_KEY
+    }
 
-    return session
+    logger.info(f"Fetching {ticker} from {start_date} to {end_date}")
 
-# -----------------------------
-# Fetch stock data with retries
-# -----------------------------
-def fetch_stock_data(ticker: str, start: str, end: str) -> pd.DataFrame:
+    response = requests.get(url, params=params, timeout=30)
+    data = response.json()
 
-    session = get_session()
+    # -----------------------------
+    # Error handling
+    # -----------------------------
+    if data.get("status") == "error":
+        msg = data.get("message", "Unknown error")
+        raise ValueError(f"Twelve Data error: {msg}")
 
-    # Try up to 3 times with delay
-    for attempt in range(3):
-        try:
-            logger.info(f"Attempt {attempt+1}: Fetching {ticker} from {start} to {end}")
+    if "values" not in data:
+        logger.error(f"Unexpected response: {data}")
+        raise ValueError(f"No data returned for ticker '{ticker}'")
 
-            df = yf.download(
-                ticker,
-                start=start,
-                end=end,
-                progress=False,
-                auto_adjust=True,
-                session=session
-            )
+    values = data["values"]
 
-            if not df.empty:
-                logger.info(f"Success: {len(df)} rows fetched")
-                return df
+    if len(values) == 0:
+        raise ValueError(f"Empty data for ticker '{ticker}'")
 
-            logger.warning(f"Attempt {attempt+1}: Empty dataframe")
-            time.sleep(2)
+    # -----------------------------
+    # Parse into DataFrame
+    # -----------------------------
+    df = pd.DataFrame(values)
+    df["datetime"] = pd.to_datetime(df["datetime"])
+    df.set_index("datetime", inplace=True)
+    df = df.sort_index(ascending=True)
 
-        except Exception as e:
-            logger.error(f"Attempt {attempt+1} failed: {str(e)}")
-            time.sleep(2)
+    df.rename(columns={
+        "open":   "Open",
+        "high":   "High",
+        "low":    "Low",
+        "close":  "Close",
+        "volume": "Volume"
+    }, inplace=True)
 
-    return pd.DataFrame()
+    df = df[["Open", "High", "Low", "Close", "Volume"]].astype(float)
+
+    logger.info(f"Fetched {len(df)} rows for {ticker}")
+
+    return df
 
 # -----------------------------
 # Home / Health Check Route
@@ -152,29 +145,34 @@ def predict(data: StockInput):
     ticker = data.ticker
     logger.info(f"Predicting for ticker: {ticker}, date: {data.end_date}")
 
+    # -----------------------------
+    # Validate date
+    # -----------------------------
     try:
         end_dt = datetime.strptime(data.end_date, "%Y-%m-%d")
     except ValueError:
         return {"error": "Invalid date format. Use YYYY-MM-DD"}
 
-    start_dt      = end_dt - timedelta(days=200)
+    start_dt     = end_dt - timedelta(days=200)
     future_end_dt = end_dt + timedelta(days=10)
 
     # -----------------------------
-    # Fetch all data in one call
+    # Fetch stock data
     # -----------------------------
-    full_df = fetch_stock_data(
-        ticker,
-        start=start_dt.strftime("%Y-%m-%d"),
-        end=future_end_dt.strftime("%Y-%m-%d")
-    )
+    try:
+        full_df = fetch_stock_data(
+            ticker,
+            start_date=start_dt.strftime("%Y-%m-%d"),
+            end_date=future_end_dt.strftime("%Y-%m-%d")
+        )
+    except ValueError as e:
+        return {"error": str(e)}
+    except Exception as e:
+        logger.error(f"Fetch error: {str(e)}")
+        return {"error": f"Failed to fetch stock data: {str(e)}"}
 
     if full_df.empty:
-        return {"error": f"Could not fetch data for '{ticker}'. Yahoo Finance may be blocking requests. Try again in a few minutes."}
-
-    # Flatten MultiIndex columns if present
-    if isinstance(full_df.columns, pd.MultiIndex):
-        full_df.columns = full_df.columns.get_level_values(0)
+        return {"error": f"No data found for ticker '{ticker}'"}
 
     # -----------------------------
     # Split into historical and future
