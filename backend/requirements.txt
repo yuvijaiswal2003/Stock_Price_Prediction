@@ -1,11 +1,11 @@
 fastapi==0.111.0
 uvicorn==0.29.0
-torch==2.2.2
+torch==2.12.0
 pandas==2.2.2
-numpy==1.26.4
+numpy==2.2.0
 scikit-learn==1.4.2
-streamlit==1.35.0
+yfinance==0.2.40
 requests==2.31.0
 matplotlib==3.8.4
 python-multipart==0.0.9
-requests-cache==0.9.8
+urllib3==2.2.1
