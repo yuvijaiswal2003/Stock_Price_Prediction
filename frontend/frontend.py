@@ -41,18 +41,21 @@ st.write(
 # -----------------------------
 # Wake backend on load
 # -----------------------------
-with st.spinner("🔌 Connecting to backend (may take ~30s on first load)..."):
-    is_alive = wake_up_backend()
+if "backend_checked" not in st.session_state:
+    with st.spinner("🔌 Connecting to backend (may take ~30s on first load)..."):
+        is_alive = wake_up_backend()
 
-msg = st.empty()
+    msg = st.empty()
 
-if is_alive:
-    msg.success("✅ Backend connected!")
-else:
-    msg.warning("⚠️ Backend may be slow to respond. Please wait.")
+    if is_alive:
+        msg.success("✅ Backend connected!")
+    else:
+        msg.warning("⚠️ Backend may be slow to respond. Please wait.")
 
-time.sleep(2)      # show for 2 seconds
-msg.empty()        # then disappear
+    time.sleep(2)
+    msg.empty()
+
+    st.session_state.backend_checked = True
 
 # -----------------------------
 # User Inputs
